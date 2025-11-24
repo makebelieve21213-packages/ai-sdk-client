@@ -47,10 +47,10 @@
 		"prepare": "husky"
 	},
 	"dependencies": {
-		"@ai-sdk/openai": "^0.0.66",
+		"@ai-sdk/openai": "^2.0.72",
 		"@nestjs/common": "^11.0.1",
 		"@nestjs/config": "^4.0.2",
-		"ai": "^4.2.0",
+		"ai": "^5.0.101",
 		"reflect-metadata": "^0.2.2",
 		"rxjs": "^7.8.1"
 	},
