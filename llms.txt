@@ -1,0 +1,226 @@
+# @packages/ai-sdk-client - Документация для ИИ
+
+## Краткое описание
+
+NestJS модуль для интеграции с AI SDK (Vercel AI SDK) для работы с OpenAI и другими провайдерами AI моделей. Предоставляет streaming ответов, управление контекстом, поддержку tools с автоматическим преобразованием JSON Schema в Zod схемы.
+
+## Архитектура
+
+Пакет предоставляет NestJS модуль `AiSdkModule` для работы с AI моделями через Vercel AI SDK.
+
+## Структура пакета
+
+```
+src/
+├── main/
+│   ├── ai-sdk.module.ts        # NestJS модуль (DynamicModule, forRootAsync)
+│   ├── ai-sdk.service.ts       # Основной сервис (streamMessage)
+│   └── __tests__/              # Тесты
+├── types/
+│   └── ai-sdk.types.ts         # TypeScript типы (AiSdkConfig, SendMessageParams)
+├── utils/
+│   ├── json-schema-to-zod.ts   # Утилита преобразования JSON Schema в Zod схему
+│   ├── injection-keys.ts       # Injection tokens для DI
+│   └── __tests__/              # Тесты утилит
+└── index.ts                    # Экспорты пакета
+```
+
+**Примечание:** Конфигурация должна создаваться в сервисе, который использует пакет, а не в самом пакете.
+
+## Основные компоненты
+
+### AiSdkModule
+
+NestJS модуль для регистрации AiSdkService:
+- `forRootAsync(options)` - асинхронная конфигурация через useFactory
+- Экспортирует `AiSdkService` для использования в других модулях
+
+### AiSdkService
+
+Сервис для работы с AI SDK через Vercel AI SDK:
+- Конструктор валидирует обязательные поля конфигурации (`baseURL`, `apiKey`)
+- `streamMessage(params)` - отправка сообщения и получение ответа в виде стрима (AsyncGenerator)
+- Поддерживает tools с автоматическим преобразованием JSON Schema в Zod схемы
+- Использует `maxSteps: 5` для автоматического продолжения генерации после tool calls
+- Обрабатывает три потока данных: `textStream`, `fullStream`, и финальный `result`
+
+### AiSdkConfig
+
+Конфигурация для настройки провайдера и модели:
+- `baseURL` - базовый URL API (опционально, по умолчанию: https://api.openai.com/v1)
+- `apiKey` - API ключ провайдера (обязательно)
+- `model` - модель для использования (OpenAIModel: "gpt-4", "gpt-4-turbo", "gpt-4o", "gpt-3.5-turbo", "gpt-3.5-turbo-16k")
+- `maxTokens` - максимальное количество токенов (опционально)
+- `temperature` - температура для генерации 0.0-2.0 (опционально)
+
+### SendMessageParams
+
+Параметры для отправки сообщения:
+- `userId` - идентификатор пользователя (обязательно)
+- `text` - текст сообщения пользователя (обязательно)
+- `conversationHistory` - история разговора (TChatMessage[], опционально), где TChatMessage extends { type: MessageType; text: string }
+- `systemPrompt` - системный промпт для настройки поведения AI (опционально)
+- `tools` - массив определений tools (TToolDefinition[], опционально), где TToolDefinition extends { name: string; description: string; parameters: Record<string, unknown> }
+- `contextData` - данные для tools в формате Record<string, unknown> (опционально)
+
+### jsonSchemaToZod
+
+Утилита для преобразования JSON Schema в Zod схему:
+- Поддерживает типы: `string`, `number`, `boolean`, `array`
+- Автоматически обрабатывает опциональные поля через `required`
+- Поддерживает вложенные массивы с типизацией элементов (string[], number[])
+- Используется внутри `AiSdkService` для преобразования `TToolDefinition.parameters` в Zod схемы
+- Возвращает `z.object({}).passthrough()` если схема отсутствует или некорректна
+
+## Механизм работы streamMessage
+
+1. **Формирование сообщений**: Преобразует `conversationHistory` в формат AI SDK (role: "user" | "assistant")
+2. **Преобразование tools**: Каждый `TToolDefinition` преобразуется в AI SDK tool:
+   - `parameters` (JSON Schema) → Zod схема через `jsonSchemaToZod`
+   - `execute` функция возвращает данные из `contextData[toolDef.name]`
+   - Валидация наличия данных (проверка null, undefined, пустых массивов/объектов)
+3. **Streaming**: Использует `streamText` из AI SDK с параметрами:
+   - `maxSteps: 5` - автоматическое продолжение после tool calls
+   - `maxTokens`, `temperature` из конфигурации
+4. **Обработка потоков**: 
+   - Сначала пытается читать `textStream` (быстрый путь)
+   - Если `textStream` пустой, читает `fullStream` для отслеживания tool calls
+   - Если все еще нет данных, проверяет финальный `result` с таймаутами
+5. **Обработка ошибок**: Детальные сообщения об ошибках с контекстом (количество сообщений, tools, contextData keys)
+
+## Использование
+
+### Регистрация модуля
+
+```typescript
+// app.module.ts
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { AiSdkModule } from '@packages/ai-sdk-client';
+import aiSdkConfig from 'src/configs/ai-sdk.config';
+import type { AiSdkConfiguration } from 'src/configs/ai-sdk.config';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      load: [aiSdkConfig],
+    }),
+    AiSdkModule.forRootAsync<[AiSdkConfiguration]>({
+      useFactory: (config: AiSdkConfiguration) => config,
+      inject: [aiSdkConfig.KEY],
+      imports: [ConfigModule],
+    }),
+  ],
+})
+export class AppModule {}
+```
+
+### Использование сервиса
+
+```typescript
+// chat.service.ts
+import { Injectable } from '@nestjs/common';
+import { AiSdkService } from '@packages/ai-sdk-client';
+// Типы ChatMessage и ToolDefinition определяются пользователем
+// ChatMessage должен иметь структуру: { type: MessageType; text: string }
+// ToolDefinition должен иметь структуру: { name: string; description: string; parameters: Record<string, unknown> }
+
+@Injectable()
+export class ChatService {
+  constructor(private readonly aiSdkService: AiSdkService) {}
+
+  async *streamMessage(
+    userId: string, 
+    text: string, 
+    history: ChatMessage[] = [],
+    tools?: ToolDefinition[],
+    contextData?: Record<string, unknown>
+  ) {
+    for await (const chunk of this.aiSdkService.streamMessage({
+      userId,
+      text,
+      conversationHistory: history,
+      systemPrompt: "Ты помощник по криптовалютам",
+      tools,
+      contextData,
+    })) {
+      yield chunk;
+    }
+  }
+}
+```
+
+## Важные особенности реализации
+
+1. **Обработка tool calls**: Tools выполняются на стороне Chat Service, а не в самом пакете. Пакет только возвращает данные из `contextData` при вызове tool.
+
+2. **Валидация contextData**: При вызове tool проверяется наличие данных:
+   - null/undefined → возвращает `{ error: "No data available for this tool" }`
+   - Пустой массив → возвращает ошибку
+   - Пустой объект → возвращает ошибку
+   - Примитивные типы → возвращает как есть
+
+3. **Streaming стратегия**: Используется многоуровневая стратегия чтения потоков:
+   - `textStream` → `fullStream` → `result.text` с таймаутами
+
+4. **Таймауты**: Используются таймауты для предотвращения зависания:
+   - `finishReason`: 5 секунд
+   - `text` и `toolCalls`: 30 секунд
+
+5. **Обработка ошибок**: Все ошибки оборачиваются с контекстом (количество сообщений, tools, contextData keys) для упрощения отладки.
+
+## Переменные окружения
+
+- `OPENAI_API_KEY` - API ключ провайдера (обязательно)
+- `OPENAI_MODEL` - Модель для использования (по умолчанию: `gpt-4`)
+- `OPENAI_BASE_URL` - Базовый URL API (опционально)
+- `OPENAI_MAX_TOKENS` - Максимальное количество токенов (по умолчанию: `1000`)
+- `OPENAI_TEMPERATURE` - Температура для генерации 0.0-2.0 (по умолчанию: `0.7`)
+
+## Экспорты (index.ts)
+
+Пакет экспортирует:
+
+Модули:
+- `AiSdkModule` (default export)
+
+Сервисы:
+- `AiSdkService` (default export)
+
+Типы:
+- `AiSdkConfig` (интерфейс)
+- `SendMessageParams` (интерфейс)
+- `OpenAIModel` (тип)
+
+Утилиты:
+- `jsonSchemaToZod` (функция)
+
+Ошибки:
+- `AiSdkError` (default export)
+
+## Интеграция с другими пакетами
+
+### @nestjs/config
+
+Интеграция с ConfigModule для загрузки конфигурации из переменных окружения.
+
+### Типы сообщений и tools
+
+Пакет использует дженерики для типов `ChatMessage` и `ToolDefinition` в `SendMessageParams`:
+- `ChatMessage` - должен иметь структуру: `{ type: MessageType; text: string }`
+- `MessageType` - enum типов сообщений (USER, COPILOT), экспортируется из пакета
+- `ToolDefinition` - должен иметь структуру: `{ name: string; description: string; parameters: Record<string, unknown> }`
+
+## Тестирование
+
+Пакет имеет 100% покрытие тестами. Все компоненты протестированы через Jest.
+
+## Зависимости
+
+- `@nestjs/common` - NestJS core
+- `@nestjs/config` - NestJS config
+- `ai` - Vercel AI SDK (v4.2.0+)
+- `@ai-sdk/openai` - OpenAI provider для AI SDK
+- `reflect-metadata` - TypeScript decorators
+- `rxjs` - Reactive extensions
