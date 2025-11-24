@@ -1,11 +1,5 @@
 import type { InjectionToken, ModuleMetadata, OptionalFactoryDependency } from "@nestjs/common";
 
-// Тип сообщения в чате
-export enum MessageType {
-	USER = "user",
-	COPILOT = "copilot",
-}
-
 // Поддерживаемые модели OpenAI
 export type OpenAIModel =
 	| "gpt-4"
@@ -37,15 +31,15 @@ export interface AiSdkConfig {
 
 // Параметры для отправки сообщения
 export interface SendMessageParams<
-	TChatMessage extends { type: MessageType; text: string } = { type: MessageType; text: string },
+	TChatMessage extends { type: string; text: string } = { type: string; text: string },
 	TToolDefinition extends {
 		name: string;
 		description: string;
-		parameters: Record<string, unknown>;
+		parameters?: Record<string, unknown>;
 	} = {
 		name: string;
 		description: string;
-		parameters: Record<string, unknown>;
+		parameters?: Record<string, unknown>;
 	},
 > {
 	userId: string;

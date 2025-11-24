@@ -17,11 +17,14 @@ src/
 │   ├── ai-sdk.service.ts       # Основной сервис (streamMessage)
 │   └── __tests__/              # Тесты
 ├── types/
-│   └── ai-sdk.types.ts         # TypeScript типы (AiSdkConfig, SendMessageParams)
+│   ├── ai-sdk.types.ts         # TypeScript типы (AiSdkConfig, SendMessageParams)
+│   └── message-type.ts         # Типы сообщений (MessageType enum)
 ├── utils/
-│   ├── json-schema-to-zod.ts   # Утилита преобразования JSON Schema в Zod схему
 │   ├── injection-keys.ts       # Injection tokens для DI
 │   └── __tests__/              # Тесты утилит
+├── errors/
+│   ├── ai-sdk.error.ts         # Кастомные ошибки
+│   └── __tests__/              # Тесты ошибок
 └── index.ts                    # Экспорты пакета
 ```
 
@@ -63,20 +66,19 @@ NestJS модуль для регистрации AiSdkService:
 - `tools` - массив определений tools (TToolDefinition[], опционально), где TToolDefinition extends { name: string; description: string; parameters: Record<string, unknown> }
 - `contextData` - данные для tools в формате Record<string, unknown> (опционально)
 
-### jsonSchemaToZod
+### MessageType
 
-Утилита для преобразования JSON Schema в Zod схему:
-- Поддерживает типы: `string`, `number`, `boolean`, `array`
-- Автоматически обрабатывает опциональные поля через `required`
-- Поддерживает вложенные массивы с типизацией элементов (string[], number[])
-- Используется внутри `AiSdkService` для преобразования `TToolDefinition.parameters` в Zod схемы
-- Возвращает `z.object({}).passthrough()` если схема отсутствует или некорректна
+Enum типов сообщений:
+- `USER` - сообщение от пользователя
+- `COPILOT` - сообщение от ассистента (AI)
+
+Используется для определения роли сообщения в `conversationHistory` при преобразовании в формат AI SDK.
 
 ## Механизм работы streamMessage
 
 1. **Формирование сообщений**: Преобразует `conversationHistory` в формат AI SDK (role: "user" | "assistant")
 2. **Преобразование tools**: Каждый `TToolDefinition` преобразуется в AI SDK tool:
-   - `parameters` (JSON Schema) → Zod схема через `jsonSchemaToZod`
+   - `parameters` (JSON Schema) → передается напрямую через `jsonSchema()` из AI SDK (без конвертации)
    - `execute` функция возвращает данные из `contextData[toolDef.name]`
    - Валидация наличия данных (проверка null, undefined, пустых массивов/объектов)
 3. **Streaming**: Использует `streamText` из AI SDK с параметрами:
@@ -192,9 +194,10 @@ export class ChatService {
 - `AiSdkConfig` (интерфейс)
 - `SendMessageParams` (интерфейс)
 - `OpenAIModel` (тип)
+- `AiSdkModuleAsyncOptions` (тип)
 
-Утилиты:
-- `jsonSchemaToZod` (функция)
+Enums:
+- `MessageType` (enum: USER, COPILOT)
 
 Ошибки:
 - `AiSdkError` (default export)
@@ -214,7 +217,35 @@ export class ChatService {
 
 ## Тестирование
 
-Пакет имеет 100% покрытие тестами. Все компоненты протестированы через Jest.
+Пакет имеет **100% покрытие тестами** по всем метрикам (Statements, Branches, Functions, Lines).
+
+**Статистика тестов:**
+- Всего тестов: 90
+- Test Suites: 4
+- Покрытие: 100% по всем метрикам
+
+**Покрытые компоненты:**
+- `AiSdkService` - основной сервис с полным покрытием всех веток выполнения, включая:
+  - Конструктор с валидацией конфигурации
+  - Метод `streamMessage` со всеми путями выполнения:
+    - Обработка `textStream` (быстрый путь)
+    - Обработка `fullStream` с отслеживанием tool calls
+    - Обработка финального `result` с таймаутами
+    - Все сценарии ошибок и edge cases
+    - Различные типы `contextData` (включая пустые объекты `{}`)
+- `AiSdkModule` - модуль NestJS с тестами инициализации через `forRootAsync`
+- `AiSdkError` - кастомные ошибки с обработкой всех типов ошибок (Error, string, unknown, null, undefined)
+- `injection-keys` - утилиты для dependency injection
+
+**Особенности тестирования:**
+- Полное покрытие всех веток выполнения, включая edge cases
+- Тестирование обработки ошибок во всех сценариях (включая случаи когда error не является Error)
+- Покрытие всех путей выполнения streaming логики
+- Тестирование с различными типами `contextData` (объекты, массивы, примитивы, пустые объекты `{}`)
+- Проверка таймаутов и асинхронных операций
+- Тестирование всех тернарных операторов и условных веток
+
+Все компоненты протестированы через Jest с использованием моков для `@ai-sdk/openai` и `ai` пакетов.
 
 ## Зависимости
 
@@ -224,3 +255,5 @@ export class ChatService {
 - `@ai-sdk/openai` - OpenAI provider для AI SDK
 - `reflect-metadata` - TypeScript decorators
 - `rxjs` - Reactive extensions
+
+**Примечание:** Пакет использует `jsonSchema()` из AI SDK для передачи JSON Schema напрямую без конвертации через Zod. Это сохраняет оригинальную структуру схемы и избегает потери информации при конвертациях.

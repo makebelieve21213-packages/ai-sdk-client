@@ -1,9 +1,8 @@
 import { openai } from "@ai-sdk/openai";
 import { Injectable } from "@nestjs/common";
-import { type CoreMessage, type LanguageModelV1, type ToolCallPart, streamText, tool } from "ai";
+import { type CoreMessage, jsonSchema, type LanguageModelV1, streamText, tool } from "ai";
 import AiSdkError from "src/errors/ai-sdk.error";
-import { MessageType } from "src/types/ai-sdk.types";
-import jsonSchemaToZod from "src/utils/json-schema-to-zod";
+import { MessageType } from "src/types/message-type";
 
 import type { AiSdkConfig, SendMessageParams } from "src/types/ai-sdk.types";
 
@@ -14,11 +13,13 @@ export default class AiSdkService {
 
 	constructor(private readonly config: AiSdkConfig) {
 		if (!this.config.baseURL) {
-			throw new AiSdkError("baseURL is required");
+			throw new AiSdkError("baseURL is required", undefined, { config: { model: this.config.model } });
 		}
 
 		if (!this.config.apiKey) {
-			throw new AiSdkError("apiKey is required");
+			throw new AiSdkError("apiKey is required", undefined, {
+				config: { model: this.config.model, baseURL: this.config.baseURL },
+			});
 		}
 
 		this.model = openai(this.config.model, {
@@ -28,47 +29,58 @@ export default class AiSdkService {
 	}
 
 	// Стриминг ответа от AI (для real-time обновлений)
-	async *streamMessage(params: SendMessageParams): AsyncGenerator<string, void, unknown> {
+	async *streamMessage<
+		TChatMessage extends { type: string; text: string } = { type: string; text: string },
+		TToolDefinition extends {
+			name: string;
+			description: string;
+			parameters?: Record<string, unknown>;
+		} = {
+			name: string;
+			description: string;
+			parameters?: Record<string, unknown>;
+		},
+	>(
+		params: SendMessageParams<TChatMessage, TToolDefinition>
+	): AsyncGenerator<string, void, unknown> {
 		const { text, conversationHistory = [], systemPrompt, tools, contextData } = params;
 
 		// Формируем историю разговора с правильной типизацией CoreMessage[]
 		const messages: CoreMessage[] = conversationHistory.map((msg) => ({
-			role: msg.type === MessageType.USER ? "user" : "assistant",
+			role: msg.type === MessageType.USER ? ("user" as const) : ("assistant" as const),
 			content: msg.text,
 		}));
 
 		messages.push({
-			role: "user",
+			role: "user" as const,
 			content: text,
 		});
 
 		/**
 		 * Если данные уже получены на Chat Service (есть в contextData), добавляем их как результат tool call
-		 * Это позволяет модели сразу использовать данные без необходимости "вызывать" тулу
+		 * Это позволяет модели сразу использовать данные без необходимости "вызывать" тул
 		 */
 		if (contextData && Object.keys(contextData).length > 0) {
 			// Добавляем ассистент сообщение с tool calls
-			const toolCalls = Object.entries(contextData).map(
-				([toolName]): ToolCallPart => ({
-					type: "tool-call",
-					toolCallId: `pre-fetched-${toolName}`,
-					toolName,
-					args: {}, // Данные уже получены, аргументы не нужны
-				})
-			);
+			const toolCalls = Object.entries(contextData).map(([toolName]) => ({
+				type: "tool-call" as const,
+				toolCallId: `pre-fetched-${toolName}`,
+				toolName,
+				args: {}, // Данные уже получены, аргументы не нужны
+			}));
 
 			messages.push({
-				role: "assistant",
+				role: "assistant" as const,
 				content: toolCalls,
 			});
 
 			// Добавляем tool results
 			Object.entries(contextData).forEach(([toolName, toolData]) => {
 				messages.push({
-					role: "tool",
+					role: "tool" as const,
 					content: [
 						{
-							type: "tool-result",
+							type: "tool-result" as const,
 							toolCallId: `pre-fetched-${toolName}`,
 							toolName,
 							result: toolData,
@@ -87,13 +99,19 @@ export default class AiSdkService {
 		const aiSdkTools = tools
 			? Object.fromEntries(
 					tools.map((toolDef) => {
-						const zodSchema = jsonSchemaToZod(toolDef.parameters);
+						/**
+						 * Используем jsonSchema() helper для передачи JSON Schema напрямую без конвертации через Zod
+						 * Это сохраняет оригинальную структуру схемы и избегает потери информации при конвертациях
+						 */
+						const inputSchema = toolDef.parameters
+							? jsonSchema(toolDef.parameters)
+							: jsonSchema({ type: "object", properties: {} });
 
 						return [
 							toolDef.name,
 							tool({
 								description: toolDef.description,
-								parameters: zodSchema as unknown as Parameters<typeof tool>[0]["parameters"],
+								parameters: inputSchema, // AI SDK использует 'parameters' но принимает Schema объект
 								execute: async () => {
 									// Проверяем, есть ли данные в contextData
 									const toolData = contextData?.[toolDef.name];
@@ -136,12 +154,16 @@ export default class AiSdkService {
 			}
 
 			// Если textStream пустой, читаем fullStream для отслеживания tool calls и текста после них
-			if (!chunkCount) {
-				let streamError: Error | null = null;
+			if (chunkCount === 0) {
+				let streamError: AiSdkError | null = null;
 
 				for await (const part of result.fullStream) {
 					if (part.type === "error") {
-						streamError = AiSdkError.fromError(part.error);
+						streamError = AiSdkError.fromError(part.error, {
+							messagesCount: messages.length,
+							toolsCount: tools?.length || 0,
+							contextDataKeys: contextData ? Object.keys(contextData) : [],
+						});
 						break; // Прерываем чтение при ошибке
 					}
 
@@ -152,19 +174,22 @@ export default class AiSdkService {
 				}
 
 				if (streamError) {
-					throw AiSdkError.fromError(streamError);
+					throw streamError;
 				}
 			}
 
 			// Если все еще нет чанков после чтения fullStream, проверяем финальный результат
-			if (!chunkCount) {
+			if (chunkCount === 0) {
 				// Получаем финальный результат - result уже является объектом, но text и toolCalls могут быть промисами
 				try {
 					const finishReason = await Promise.race([
 						result.finishReason,
 						new Promise<string>((_, reject) => {
 							const timer = setTimeout(
-								() => reject(new AiSdkError("Timeout waiting for result.finishReason")),
+								() =>
+									reject(
+										new AiSdkError("Timeout waiting for result.finishReason", undefined, { timeout: 5000 })
+									),
 								5000
 							);
 							timer.unref();
@@ -175,7 +200,8 @@ export default class AiSdkService {
 						result.text,
 						new Promise<string>((_, reject) => {
 							const timer = setTimeout(
-								() => reject(new AiSdkError("Timeout waiting for result.text")),
+								() =>
+									reject(new AiSdkError("Timeout waiting for result.text", undefined, { timeout: 30000 })),
 								30000
 							);
 							timer.unref();
@@ -186,7 +212,10 @@ export default class AiSdkService {
 						result.toolCalls,
 						new Promise<unknown[]>((_, reject) => {
 							const timer = setTimeout(
-								() => reject(new AiSdkError("Timeout waiting for result.toolCalls")),
+								() =>
+									reject(
+										new AiSdkError("Timeout waiting for result.toolCalls", undefined, { timeout: 30000 })
+									),
 								30000
 							);
 							timer.unref();
@@ -207,36 +236,58 @@ export default class AiSdkService {
 
 						try {
 							const delayedText = await result.text;
-
 							if (delayedText && delayedText.trim().length) {
 								yield delayedText;
 								chunkCount = 1;
 							} else {
 								const errorMessage = `AI SDK called tools but did not generate text. ToolCalls: ${finalToolCalls.length}, FinishReason: ${finishReason || "unknown"}`;
-								throw new AiSdkError(errorMessage);
+								throw new AiSdkError(errorMessage, undefined, {
+									toolCallsCount: finalToolCalls.length,
+									finishReason: finishReason || "unknown",
+									messagesCount: messages.length,
+									toolsCount: tools?.length || 0,
+									contextDataKeys: contextData ? Object.keys(contextData) : [],
+								});
 							}
 						} catch (delayedError: Error | unknown) {
 							const errorMessage = `AI SDK called tools but did not generate text. ToolCalls: ${finalToolCalls.length}, FinishReason: ${finishReason || "unknown"}, Error: ${delayedError instanceof Error ? delayedError.message : "Unknown"}`;
-							throw new AiSdkError(errorMessage, delayedError);
+							throw AiSdkError.fromError(delayedError, {
+								errorMessage,
+								toolCallsCount: finalToolCalls.length,
+								finishReason: finishReason || "unknown",
+								messagesCount: messages.length,
+								toolsCount: tools?.length || 0,
+								contextDataKeys: contextData ? Object.keys(contextData) : [],
+							});
 						}
 					} else {
 						const errorMessage = `AI SDK stream completed without generating any chunks or text. Messages: ${messages.length}, Tools: ${tools?.length || 0}, ContextData keys: ${contextData ? Object.keys(contextData).join(", ") : "none"}, FinishReason: ${finishReason || "unknown"}, ToolCalls: ${finalToolCalls?.length || 0}`;
-						throw new AiSdkError(errorMessage);
+						throw new AiSdkError(errorMessage, undefined, {
+							messagesCount: messages.length,
+							toolsCount: tools?.length || 0,
+							contextDataKeys: contextData ? Object.keys(contextData).join(", ") : "none",
+							finishReason: finishReason || "unknown",
+							toolCallsCount: finalToolCalls?.length || 0,
+						});
 					}
 				} catch (resultError: Error | unknown) {
-					const errorMessage = resultError instanceof Error ? resultError.message : "Unknown error";
-					throw new AiSdkError(
-						`AI SDK stream completed without generating any chunks. Messages: ${messages.length}, Tools: ${tools?.length || 0}, ContextData keys: ${contextData ? Object.keys(contextData).join(", ") : "none"}. Error getting final result: ${errorMessage}`,
-						resultError
-					);
+					const errorMessage = `AI SDK stream completed without generating any chunks. Messages: ${messages.length}, Tools: ${tools?.length || 0}, ContextData keys: ${contextData ? Object.keys(contextData).join(", ") : "none"}. Error getting final result: ${resultError instanceof Error ? resultError.message : "Unknown error"}`;
+					throw AiSdkError.fromError(resultError, {
+						errorMessage,
+						messagesCount: messages.length,
+						toolsCount: tools?.length || 0,
+						contextDataKeys: contextData ? Object.keys(contextData).join(", ") : "none",
+					});
 				}
 			}
 		} catch (error: Error | unknown) {
-			const contextInfo = `Messages: ${messages.length}, Tools: ${tools?.length || 0}, ContextData keys: ${contextData ? Object.keys(contextData).join(", ") : "none"}`;
-			const errorStack = error instanceof Error ? error.stack : undefined;
-			const fullMessage = `AI SDK stream error. ${contextInfo}. ${errorStack || ""}`;
-
-			throw AiSdkError.fromError(error, fullMessage);
+			const errorMessage = `AI SDK stream error: ${error instanceof Error ? error.message : "Unknown error"}. Messages: ${messages.length}, Tools: ${tools?.length || 0}, ContextData keys: ${contextData ? Object.keys(contextData).join(", ") : "none"}`;
+			throw AiSdkError.fromError(error, {
+				errorMessage,
+				messagesCount: messages.length,
+				toolsCount: tools?.length || 0,
+				contextDataKeys: contextData ? Object.keys(contextData).join(", ") : "none",
+			});
 		}
 	}
 }
