@@ -100,7 +100,7 @@ export default class AiSdkService {
 			? Object.fromEntries(
 					tools.map((toolDef) => {
 						/**
-						 * Используем jsonSchema() helper для передачи JSON Schema напрямую без конвертации через Zod
+						 * Используем jsonSchema() helper для передачи JSON Schema напрямую
 						 * Это сохраняет оригинальную структуру схемы и избегает потери информации при конвертациях
 						 */
 						const inputSchema = toolDef.parameters

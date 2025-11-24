@@ -695,7 +695,7 @@ describe("AiSdkService", () => {
 			);
 		});
 
-		it("должен преобразовать JSON Schema parameters в Zod схему для tools", async () => {
+		it("должен преобразовать JSON Schema parameters для tools", async () => {
 			const paramsWithComplexSchema: SendMessageParams<ChatMessage, ToolDefinition> = {
 				userId: "user-123",
 				text: "Получи данные",
